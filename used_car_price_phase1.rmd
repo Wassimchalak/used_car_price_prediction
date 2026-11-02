@@ -1,0 +1,772 @@
+---
+title: "Used Car Price Prediction"
+subtitle: "Phase I: Exploration and Linear Regression"
+date: "October 20, 2026"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+fontsize: 10pt
+geometry: margin=0.7in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "95%"
+)
+
+library(tidyverse)
+library(car)
+options(scipen = 999)
+```
+
+# Introduction
+
+The goal of this project is to study the factors associated with used-car prices and compare several regression approaches. The response variable is car price in USD. The analysis moves from single-predictor regression to multiple regression, interaction effects, and a polynomial model, then compares the models using test-set error and regression diagnostics.
+
+The working dataset is based on the Kaggle **Car Price Prediction Dataset for Regression Models**:
+
+<https://www.kaggle.com/datasets/dhruvnr/car-price-prediction-dataset-for-regression-models>
+
+The original working file contains 10,000 observations and 15 variables. Fuel Type, Location, and Insurance Type are excluded from the analysis. 
+
+# Data Preparation
+
+```{r prepare-data, include=FALSE}
+df <- read.csv("car_data.csv")
+
+original_rows <- nrow(df)
+original_cols <- ncol(df)
+
+df <- df %>%
+  select(-Fuel.Type, -Location, -Insurance.Type)
+
+missing_after_removal <- sum(is.na(df))
+duplicates_after_removal <- sum(duplicated(df))
+
+set.seed(123)
+df <- df[sample(seq_len(nrow(df)), 5000), ]
+rownames(df) <- NULL
+
+df$Brand <- as.factor(df$Brand)
+df$Model <- as.factor(df$Model)
+df$Transmission.Type <- as.factor(df$Transmission.Type)
+df$Color <- as.factor(df$Color)
+df$Service.History <- as.factor(df$Service.History)
+df$Previous.Accidents <- as.factor(df$Previous.Accidents)
+df$Car.Type <- as.factor(df$Car.Type)
+
+df$Price.USD <- round(df$Price..INR. / 95.01)
+```
+
+The main preprocessing steps are summarized below.
+
+```{r preprocessing-table}
+prep_table <- data.frame(
+  Item = c(
+    "Original observations",
+    "Original variables",
+    "Variables after removal",
+    "Missing values after removal",
+    "Duplicated rows",
+    "Observations used in analysis"
+  ),
+  Value = c(
+    original_rows,
+    original_cols,
+    12,
+    missing_after_removal,
+    duplicates_after_removal,
+    nrow(df)
+  )
+)
+
+knitr::kable(prep_table, align = c("l", "r"))
+```
+
+The retained categorical variables were converted to factors. Price was converted from INR to USD using the same conversion used in the working analysis.
+
+## Quantitative Summary
+
+```{r quantitative-summary}
+quant_vars <- c(
+  "Year",
+  "Odometer.Reading..km.",
+  "Number.of.Owners",
+  "Engine.Capacity..L.",
+  "Price.USD"
+)
+
+quant_summary <- t(sapply(df[quant_vars], function(x) {
+  s <- summary(x)
+  c(
+    Min = s[1],
+    Q1 = s[2],
+    Median = s[3],
+    Mean = s[4],
+    Q3 = s[5],
+    Max = s[6]
+  )
+}))
+
+quant_summary <- round(quant_summary, 2)
+
+knitr::kable(
+  quant_summary,
+  caption = "Summary statistics for quantitative variables"
+)
+```
+
+Car prices are strongly right-skewed: the mean price is higher than the median and a relatively small number of cars appear in the upper price tail.
+
+# Exploratory Data Analysis
+
+```{r eda-price, fig.width=7, fig.height=3.8}
+p_hist <- ggplot(df, aes(x = Price.USD)) +
+  geom_histogram(binwidth = 5000, color = "black") +
+  scale_x_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Distribution of Car Prices",
+    x = "Price (USD)",
+    y = "Frequency"
+  )
+
+p_box <- ggplot(df, aes(x = "", y = Price.USD)) +
+  geom_boxplot() +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Boxplot of Car Prices",
+    x = NULL,
+    y = "Price (USD)"
+  ) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+grid::grid.newpage()
+grid::pushViewport(
+  grid::viewport(
+    layout = grid::grid.layout(1, 2)
+  )
+)
+print(p_hist, vp = grid::viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(p_box, vp = grid::viewport(layout.pos.row = 1, layout.pos.col = 2))
+```
+
+The histogram and boxplot confirm the long upper tail and the presence of many high-price statistical outliers.
+
+```{r eda-numeric, fig.width=7, fig.height=4}
+p_year <- ggplot(df, aes(x = Year, y = Price.USD)) +
+  geom_point(alpha = 0.45) +
+  scale_x_continuous(breaks = seq(2000, 2024, by = 4)) +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Price versus Manufacturing Year",
+    x = "Year",
+    y = "Price (USD)"
+  )
+
+p_odom <- ggplot(
+  df,
+  aes(
+    x = Odometer.Reading..km.,
+    y = Price.USD,
+    color = Year
+  )
+) +
+  geom_point(alpha = 0.4) +
+  scale_x_continuous(breaks = seq(0, 200000, by = 40000)) +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Price versus Odometer Reading",
+    x = "Odometer Reading (km)",
+    y = "Price (USD)",
+    color = "Year"
+  )
+
+grid::grid.newpage()
+grid::pushViewport(
+  grid::viewport(
+    layout = grid::grid.layout(1, 2)
+  )
+)
+print(p_year, vp = grid::viewport(layout.pos.row = 1, layout.pos.col = 1))
+print(p_odom, vp = grid::viewport(layout.pos.row = 1, layout.pos.col = 2))
+```
+
+Manufacturing year shows a clear positive relationship with price. Odometer reading alone shows a much weaker pattern, and the color gradient indicates that year is an important part of the price structure.
+
+```{r eda-brand, fig.width=7, fig.height=4}
+ggplot(df, aes(x = Year, y = Price.USD, color = Brand)) +
+  geom_point(alpha = 0.45) +
+  scale_x_continuous(breaks = seq(2000, 2024, by = 4)) +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Car Price versus Manufacturing Year by Brand",
+    x = "Year",
+    y = "Price (USD)",
+    color = "Brand"
+  )
+```
+
+The brand plot shows substantial differences in price level and suggests that the effect of year may vary across brands.
+
+```{r eda-categorical, fig.width=7, fig.height=7.5}
+categorical_data <- df %>%
+  select(
+    Price.USD,
+    Brand,
+    Transmission.Type,
+    Color,
+    Service.History,
+    Previous.Accidents,
+    Car.Type
+  ) %>%
+  pivot_longer(
+    cols = -Price.USD,
+    names_to = "Attribute",
+    values_to = "Category"
+  )
+
+ggplot(categorical_data, aes(x = Category, y = Price.USD)) +
+  geom_boxplot() +
+  facet_wrap(~Attribute, scales = "free_x", ncol = 2) +
+  scale_y_continuous(breaks = seq(0, 100000, by = 20000)) +
+  labs(
+    title = "Car Price by Categorical Attributes",
+    x = "",
+    y = "Price (USD)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(size = 9)
+  )
+```
+
+Brand and Car Type show the clearest price differences among the categorical variables. The other categorical variables overlap more strongly.
+
+# Hypotheses
+
+The exploratory analysis motivates the following hypotheses:
+
+1. Newer cars tend to have higher prices.
+2. Higher odometer readings may reduce price, although the individual effect may be weak.
+3. Prices differ across brands and car types.
+4. The effect of year may depend on other car characteristics, motivating interaction terms.
+5. The Year-price relationship may contain some nonlinearity, motivating a polynomial term.
+
+# Train/Test Split
+
+```{r split-data, include=FALSE}
+set.seed(456)
+
+train_index <- sample(
+  seq_len(nrow(df)),
+  size = 0.8 * nrow(df)
+)
+
+train <- df[train_index, ]
+test <- df[-train_index, ]
+```
+
+```{r split-table}
+split_table <- data.frame(
+  Dataset = c("Training", "Test"),
+  Observations = c(nrow(train), nrow(test)),
+  Percentage = c("80%", "20%")
+)
+
+knitr::kable(split_table)
+```
+
+All models are fitted using the training data and evaluated on the same test set.
+
+# Simple Linear Regression
+
+Three separate simple linear regression models are first tested using Engine Capacity, Year, and Odometer Reading individually.
+
+```{r slr-models, include=FALSE}
+slr_engine <- lm(
+  Price.USD ~ Engine.Capacity..L.,
+  data = train
+)
+
+slr_year <- lm(
+  Price.USD ~ Year,
+  data = train
+)
+
+slr_odometer <- lm(
+  Price.USD ~ Odometer.Reading..km.,
+  data = train
+)
+
+slr_engine_predictions <- predict(slr_engine, newdata = test)
+slr_year_predictions <- predict(slr_year, newdata = test)
+slr_odometer_predictions <- predict(slr_odometer, newdata = test)
+
+slr_engine_mse <- mean((test$Price.USD - slr_engine_predictions)^2)
+slr_year_mse <- mean((test$Price.USD - slr_year_predictions)^2)
+slr_odometer_mse <- mean((test$Price.USD - slr_odometer_predictions)^2)
+
+slr_engine_rmse <- sqrt(slr_engine_mse)
+slr_year_rmse <- sqrt(slr_year_mse)
+slr_odometer_rmse <- sqrt(slr_odometer_mse)
+
+slr_model <- slr_year
+slr_predictions <- slr_year_predictions
+slr_mse <- slr_year_mse
+slr_rmse <- slr_year_rmse
+```
+
+```{r slr-table}
+slr_comparison <- data.frame(
+  Predictor = c(
+    "Engine Capacity",
+    "Year",
+    "Odometer Reading"
+  ),
+  Slope = c(
+    coef(slr_engine)[2],
+    coef(slr_year)[2],
+    coef(slr_odometer)[2]
+  ),
+  `p-value` = c(
+    summary(slr_engine)$coefficients[2, 4],
+    summary(slr_year)$coefficients[2, 4],
+    summary(slr_odometer)$coefficients[2, 4]
+  ),
+  `R-squared` = c(
+    summary(slr_engine)$r.squared,
+    summary(slr_year)$r.squared,
+    summary(slr_odometer)$r.squared
+  ),
+  RMSE = c(
+    slr_engine_rmse,
+    slr_year_rmse,
+    slr_odometer_rmse
+  )
+)
+
+slr_comparison[, 2:5] <- round(slr_comparison[, 2:5], 4)
+
+knitr::kable(
+  slr_comparison,
+  caption = "Single-predictor regression comparison"
+)
+```
+
+Year is the strongest single predictor, explaining about 22% of the variation in price. Engine Capacity and Odometer Reading have almost no explanatory power when used alone. Even the Year-only model has a relatively high test RMSE, showing that a single predictor is not enough.
+
+# Multiple Linear Regression
+
+A first MLR uses Year, Odometer Reading, and Brand.
+
+```{r manual-mlr, include=FALSE}
+mlr_model <- lm(
+  Price.USD ~
+    Year +
+    Odometer.Reading..km. +
+    Brand,
+  data = train
+)
+
+mlr_predictions <- predict(mlr_model, newdata = test)
+mlr_mse <- mean((test$Price.USD - mlr_predictions)^2)
+mlr_rmse <- sqrt(mlr_mse)
+```
+
+```{r manual-mlr-table}
+manual_mlr_metrics <- data.frame(
+  Model = "Manual MLR",
+  `R-squared` = summary(mlr_model)$r.squared,
+  `Adjusted R-squared` = summary(mlr_model)$adj.r.squared,
+  RSE = summary(mlr_model)$sigma,
+  `Test RMSE` = mlr_rmse
+)
+
+manual_mlr_metrics[, 2:5] <- round(manual_mlr_metrics[, 2:5], 3)
+knitr::kable(manual_mlr_metrics)
+```
+
+Holding the other variables constant, Year has a strong positive coefficient, while Odometer Reading has a small negative coefficient. Brand also produces substantial price differences.
+
+A broader MLR is then selected using stepwise AIC.
+
+```{r best-mlr, include=FALSE}
+null_model <- lm(
+  Price.USD ~ 1,
+  data = train
+)
+
+full_model <- lm(
+  Price.USD ~
+    Year +
+    Odometer.Reading..km. +
+    Brand +
+    Transmission.Type +
+    Color +
+    Number.of.Owners +
+    Service.History +
+    Previous.Accidents +
+    Engine.Capacity..L. +
+    Car.Type,
+  data = train
+)
+
+best_mlr <- step(
+  null_model,
+  scope = list(
+    lower = formula(null_model),
+    upper = formula(full_model)
+  ),
+  direction = "both",
+  trace = 0
+)
+
+best_mlr_predictions <- predict(best_mlr, newdata = test)
+best_mlr_mse <- mean((test$Price.USD - best_mlr_predictions)^2)
+best_mlr_rmse <- sqrt(best_mlr_mse)
+```
+
+The selected main-effects model contains Brand, Year, Car Type, Previous Accidents, Number of Owners, Service History, Odometer Reading, and Transmission Type.
+
+```{r best-mlr-key-coefficients}
+coef_mat <- summary(best_mlr)$coefficients
+
+wanted <- c(
+  "Year",
+  "Previous.AccidentsTrue",
+  "Number.of.Owners",
+  "Service.HistoryTrue",
+  "Odometer.Reading..km.",
+  "Transmission.TypeManual"
+)
+
+wanted <- wanted[wanted %in% rownames(coef_mat)]
+
+key_coef <- data.frame(
+  Predictor = wanted,
+  Estimate = coef_mat[wanted, "Estimate"],
+  `p-value` = coef_mat[wanted, "Pr(>|t|)"]
+)
+
+key_coef[, 2:3] <- round(key_coef[, 2:3], 4)
+
+knitr::kable(
+  key_coef,
+  caption = "Selected MLR: key coefficient estimates"
+)
+```
+
+The selected MLR substantially improves prediction compared with the single-predictor regressions.
+
+# Interaction Model
+
+Two-way interactions are considered among the predictors selected in the MLR. The Brand x Car Type interaction is excluded because the initial all-pairwise specification created exact linear dependencies.
+
+```{r interaction-model, include=FALSE}
+interaction_full_clean <- update(
+  best_mlr,
+  . ~ .^2 - Brand:Car.Type
+)
+
+best_interaction <- step(
+  best_mlr,
+  scope = list(
+    lower = formula(best_mlr),
+    upper = formula(interaction_full_clean)
+  ),
+  direction = "both",
+  trace = 0
+)
+
+interaction_predictions <- predict(
+  best_interaction,
+  newdata = test
+)
+
+interaction_mse <- mean(
+  (test$Price.USD - interaction_predictions)^2
+)
+
+interaction_rmse <- sqrt(interaction_mse)
+
+interaction_terms <- grep(
+  ":",
+  attr(terms(best_interaction), "term.labels"),
+  value = TRUE
+)
+```
+
+```{r interaction-table}
+interaction_display <- data.frame(
+  Selected_Interaction = interaction_terms
+)
+
+knitr::kable(
+  interaction_display,
+  caption = "Interactions retained by stepwise selection"
+)
+```
+
+The interaction model produces a large improvement in test error, indicating that the effect of one vehicle characteristic often depends on another.
+
+# Polynomial Regression
+
+A quadratic Year term is added to the selected interaction model.
+
+```{r polynomial-model, include=FALSE}
+poly_model <- update(
+  best_interaction,
+  . ~ . + I(Year^2)
+)
+
+poly_predictions <- predict(
+  poly_model,
+  newdata = test
+)
+
+poly_mse <- mean(
+  (test$Price.USD - poly_predictions)^2
+)
+
+poly_rmse <- sqrt(poly_mse)
+```
+
+The quadratic term gives a smaller additional improvement beyond the interaction model.
+
+# Model Comparison
+
+```{r model-comparison}
+model_list <- list(
+  SLR = slr_model,
+  MLR = best_mlr,
+  Interaction = best_interaction,
+  Polynomial = poly_model
+)
+
+model_comparison <- data.frame(
+  Model = names(model_list),
+  `R-squared` = sapply(model_list, function(m) summary(m)$r.squared),
+  `Adjusted R-squared` = sapply(model_list, function(m) summary(m)$adj.r.squared),
+  RSE = sapply(model_list, function(m) summary(m)$sigma),
+  MSE = c(
+    slr_mse,
+    best_mlr_mse,
+    interaction_mse,
+    poly_mse
+  ),
+  RMSE = c(
+    slr_rmse,
+    best_mlr_rmse,
+    interaction_rmse,
+    poly_rmse
+  )
+)
+
+model_comparison[, 2:6] <- round(model_comparison[, 2:6], 3)
+
+knitr::kable(
+  model_comparison,
+  caption = "Model performance comparison"
+)
+```
+
+The polynomial model has the lowest test RMSE, while the largest improvement occurs when moving from the selected MLR to the interaction model. Predictive performance therefore improves as important interaction and nonlinear effects are introduced.
+
+# Regression Diagnostics
+
+## Residuals versus Fitted
+
+```{r residuals-fitted, fig.width=7, fig.height=6.6}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 4, 3, 1),
+  cex.main = 0.85,
+  cex.lab = 0.8,
+  cex.axis = 0.75
+)
+
+plot(slr_model, which = 1, main = "SLR")
+plot(best_mlr, which = 1, main = "MLR")
+plot(best_interaction, which = 1, main = "Interaction")
+plot(poly_model, which = 1, main = "Polynomial")
+
+par(mfrow = c(1, 1))
+```
+
+The SLR and MLR retain substantial structure in the residuals. The interaction and polynomial models reduce this pattern, although residual spread still increases for higher fitted prices.
+
+## Normal Q-Q Plots
+
+```{r qq-plots, fig.width=7, fig.height=6.6}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 4, 3, 1),
+  cex.main = 0.85,
+  cex.lab = 0.8,
+  cex.axis = 0.75
+)
+
+plot(slr_model, which = 2, main = "SLR")
+plot(best_mlr, which = 2, main = "MLR")
+plot(best_interaction, which = 2, main = "Interaction")
+plot(poly_model, which = 2, main = "Polynomial")
+
+par(mfrow = c(1, 1))
+```
+
+All models show departures from normality in the tails. The interaction and polynomial models fit the center of the residual distribution better, but heavy tails remain.
+
+## Outliers, Leverage, and Influence
+
+```{r diagnostic-calculations, include=FALSE}
+models <- list(
+  SLR = slr_model,
+  MLR = best_mlr,
+  Interaction = best_interaction,
+  Polynomial = poly_model
+)
+
+diagnostic_summary <- data.frame(
+  Model = names(models),
+  Outliers = sapply(
+    models,
+    function(m) sum(abs(rstandard(m)) > 3)
+  ),
+  High_Leverage = sapply(
+    models,
+    function(m) {
+      cutoff <- 2 * m$rank / nobs(m)
+      sum(hatvalues(m) > cutoff)
+    }
+  ),
+  Influential_Cooks = sapply(
+    models,
+    function(m) {
+      cutoff <- 4 / nobs(m)
+      sum(cooks.distance(m) > cutoff)
+    }
+  )
+)
+
+poly_standardized <- rstandard(poly_model)
+ordered_outliers <- sort(abs(poly_standardized), decreasing = TRUE)
+top_names <- names(ordered_outliers)[1:10]
+
+top_outliers <- data.frame(
+  Observation = as.integer(top_names),
+  Standardized_Residual = poly_standardized[top_names]
+)
+
+poly_cooks <- cooks.distance(poly_model)
+cook_cutoff <- 4 / nobs(poly_model)
+influential_points <- which(poly_cooks > cook_cutoff)
+
+poly_leverage <- hatvalues(poly_model)
+leverage_cutoff <- 2 * poly_model$rank / nobs(poly_model)
+high_leverage <- which(poly_leverage > leverage_cutoff)
+```
+
+```{r diagnostic-tables}
+knitr::kable(
+  diagnostic_summary,
+  caption = "Diagnostic screening counts"
+)
+
+top_outliers$Standardized_Residual <- round(
+  top_outliers$Standardized_Residual,
+  3
+)
+
+knitr::kable(
+  head(top_outliers, 5),
+  caption = "Five most extreme standardized residuals in the polynomial model"
+)
+```
+
+In the final polynomial model, observations with large standardized residuals are present, but they are not automatically removed. Cook's distance and leverage are used to assess whether they dominate the fitted model.
+
+The Cook's distance screening cutoff is `r round(cook_cutoff, 4)`, and `r length(influential_points)` observations exceed it. The largest Cook's distance is `r round(max(poly_cooks), 3)`, which is far below 1. The leverage cutoff is `r round(leverage_cutoff, 3)`, and `r length(high_leverage)` observations exceed it.
+
+## Multicollinearity
+
+```{r vif-table}
+vif_results <- vif(best_mlr)
+
+if (is.matrix(vif_results)) {
+  vif_table <- data.frame(
+    Predictor = rownames(vif_results),
+    vif_results,
+    row.names = NULL,
+    check.names = FALSE
+  )
+} else {
+  vif_table <- data.frame(
+    Predictor = names(vif_results),
+    VIF = as.numeric(vif_results)
+  )
+}
+
+vif_show <- vif_table
+numeric_cols <- sapply(vif_show, is.numeric)
+vif_show[numeric_cols] <- round(vif_show[numeric_cols], 3)
+
+knitr::kable(
+  vif_show,
+  row.names = FALSE,
+  caption = "VIF / GVIF results for the selected MLR"
+)
+```
+
+The adjusted GVIF values are close to 1, so the selected MLR does not show meaningful multicollinearity.
+
+## Scale-Location Plots
+
+```{r scale-location, fig.width=7, fig.height=6.6}
+par(
+  mfrow = c(2, 2),
+  mar = c(4, 4, 3, 1),
+  cex.main = 0.85,
+  cex.lab = 0.8,
+  cex.axis = 0.75
+)
+
+plot(slr_model, which = 3, main = "SLR")
+plot(best_mlr, which = 3, main = "MLR")
+plot(best_interaction, which = 3, main = "Interaction")
+plot(poly_model, which = 3, main = "Polynomial")
+
+par(mfrow = c(1, 1))
+```
+
+The Scale-Location plots confirm heteroscedasticity. Residual variability increases as fitted price increases, especially for the interaction and polynomial models.
+
+## Aliased Coefficients
+
+```{r alias-check}
+alias_table <- data.frame(
+  Model = c("Interaction", "Polynomial"),
+  Aliased_Coefficients = c(
+    sum(is.na(coef(best_interaction))),
+    sum(is.na(coef(poly_model)))
+  )
+)
+
+knitr::kable(alias_table)
+```
+
+Both final models have zero aliased coefficients after excluding the problematic Brand x Car Type interaction.
+
+# Conclusion
+
+The single-predictor regressions show that Year is the strongest individual predictor, while Engine Capacity and Odometer Reading alone explain very little of the variation in price. The selected MLR improves prediction substantially, and interaction terms provide the largest additional improvement. The polynomial model achieves the lowest test RMSE.
+
+The diagnostics show that the final models are not perfect. Heteroscedasticity and heavy-tailed residuals remain, and some unusual observations are present. However, no single observation dominates the model according to Cook's distance, and the corrected interaction and polynomial specifications contain no aliased coefficients. Overall, the polynomial model gives the strongest predictive performance among the models evaluated in this Phase I analysis.
